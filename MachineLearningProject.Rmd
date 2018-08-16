@@ -1,0 +1,243 @@
+---
+title: "Machine_Learing_Project_Coursera"
+author: "Tim Norton"
+date: "August 6, 2018"
+output: html_document
+---
+#Introduction
+For this project, I am to determine the manner of how participants conducted exersize from data obtained by devices that track exercise. In the past, exersize has tracked the amount of exersize, but not how the exersize is done. This project is to find out if we can predict the manner in which the exersize is done from data gathered from these devices. The data is from sensors on people as they do exersize. Sometimes the participants do the exersize correctly and sometimes not. Finally, I predict the manner of exersize for previously unseen data. Below are dimensions of the dataset. As you can see, there are many features and many of them contain NAs. It was necessary to remove features with very little information in them. Also, many features described the subject who underwent the exersize leading to highly correlated attributes. It is unnecessary to use these attributes because they can be reduced to the one variable identifying the subject of the study. I split the data into a training and test set to perform predictions and assess the results. 
+
+```{r}
+library(caret)
+library(rattle)
+library(plyr)
+library(randomForest)
+library(nnet)
+library(AppliedPredictiveModeling)
+library(e1071)
+library(ElemStatLearn)
+
+
+
+df<-read.csv(file="pml-training.csv", header=TRUE)
+cat("Dimensions of entire training dataset: ",dim(df))
+
+train.dat <- which(colSums(is.na(df) |df=="")>0.9*dim(df)[1]) 
+train.data <- df[,-train.dat]
+
+train.data<-train.data[,-c(1:7)]
+cat("Dimensions of cleaned training dataset: ",dim(train.data))
+set.seed(123)
+
+inTrain = createDataPartition(train.data$classe, p = 3/4)[[1]]
+
+training = train.data[ inTrain,]
+dim(training)
+
+
+testing=train.data[-inTrain,]
+dim(testing)
+
+x_train <- training[, -ncol(training)]
+x_test <- testing[, -ncol(testing)]
+y_train <- training$classe
+y_test<-testing$classe
+
+
+
+```
+
+## Lasso Regression
+Because there is a sparce dataframe of features, I chose lasso regression to proving a penalty to features that had little effect on the outome of a prediction. As you can see below, many features are zero. I set up the model to use the best parameters for prediction using the grid and trcontrol parameters, then display the coefficients used for the lasso regression. I used the model with the  best lambda value, or size of the penalty that effects the number of features used in the model, and used five fold cross validation on the training set. Lasso regression is usually used for numerical classes, but I chose Lasso Regression to see how a linear model would perform on classification problems.
+
+```{r}
+
+control<-trainControl(method="cv", number=5, classProbs = TRUE)
+
+tuneGrid=expand.grid(.alpha=1,.lambda=10^seq(10, -2, length = 100))
+
+lasso.mod <- train(classe~.,data=training, method="glmnet",trControl=control, metric="Accuracy", tuneGrid=tuneGrid,  family="multinomial")
+
+bestlam <- lasso.mod$lambda.min
+
+lasso.pred <- predict(lasso.mod, s=bestlam, newdata =testing, type="raw")
+
+lasso.con<-confusionMatrix( lasso.pred, testing$classe)
+
+head(varImp(lasso.mod), 53)
+
+
+```
+
+## Principal Component Analysis
+Because there are so many features, only a small subset of them could be used for predictions. If all of the features were used, there may be overfitting. Below is the investigation into principal components. When the pca parameter is used to fit the machine learning models below, I chose the number of principal components to equal a little less than %98 of the total variance. This turns out to be about 30 principal components instead of the 52 features contained in the dataset as you can see from the analysis below.
+
+```{r}
+
+pr_comp<-prcomp(x_train, scale=TRUE)
+
+st_dev<-pr_comp$sdev
+
+p_var<-st_dev^2
+
+prop_ex<-p_var/sum(p_var)
+
+summary(pr_comp)
+barplot(100*prop_ex[1:30], las=2, xlab='Components 1-30', ylab='% Variance Explained')
+
+
+```
+
+#Training Models
+I trained several models using tuning paramters to get the best results. I used five fold cross validation, principal components and selected standard parameters for neural networks. that account for 98% of the variance. I chose a variety of different algorithms for this task based on their applicability to the dataset, including the lasso regression discussed above  and including a stacking algorithm that combined all of the algorithms into an ensemble. These include, support vector machines which work best with complex classification boundaries; Neural Networks that produces it's own learning alrogithm; and Random Forests which approaches learning with many different shallower trees rather than one tree that is fully grown. 
+
+##Fitting Support Vector Machines
+```{r}
+
+
+trcontrol<-trainControl(method="repeatedcv", number=5, repeats=3, classProbs=TRUE, summaryFunction=multiClassSummary)
+
+svm.fit<-train(classe~., data=training, method="svmRadial", metric="Accuracy", preProcess = "pca", n.comp=30, trcontrol=trcontrol)
+svm.pred<-predict(svm.fit, testing)
+svm.con<-confusionMatrix(svm.pred, testing$classe)
+
+
+```
+
+##Fitting Random Forests
+
+```{r}
+
+
+
+trcontrol<-trainControl(method="repeatedcv", number=5, repeats=3, classProbs=TRUE, summaryFunction=multiClassSummary)
+
+grid.tune<-expand.grid(.mtry=c(1:6))
+
+rf_mod <- train(classe~.,data=training, method = "rf", metric="Accuracy", tuneGrid=grid.tune, preProcess = "pca", n.comp=30, trcontrol=trcontrol)
+rf_pred<-predict(rf_mod, testing)
+rf.con<-confusionMatrix(rf_pred, testing$classe)
+
+
+
+```
+
+##Fitting Neural Networks
+
+```{r, results="hide"}
+
+trcontrol<-trainControl(method="repeatedcv", number=5, repeats=3, classProbs=TRUE, summaryFunction=multiClassSummary)
+
+grid <- expand.grid(.decay = c(.05, .01), .size = c(13,15,17))
+
+
+nn.mod<-train(classe~., data=training, method="nnet", preProcess="pca", n.comp=30, maxit=1000, tuneGrid=grid, trcontrol=trcontrol)
+
+nn.pred<-predict(nn.mod, testing, type="raw")
+nn.con<-confusionMatrix(as.factor(nn.pred), testing$classe)
+```
+
+##Fitting Stacking Algorithm
+
+```{r, results="hide"}
+trcontrol<-trainControl(method="repeatedcv", number=5, repeats=3, classProbs=TRUE, summaryFunction=multiClassSummary)
+predDF <- data.frame(svm.pred, rf_pred, nn.pred, classe=testing$classe)
+modelStack <- train(classe ~ ., data = predDF, method = "gbm")
+combPred <- predict(modelStack, predDF)
+stack.con<-confusionMatrix(combPred, predDF$classe)
+
+```
+
+
+#Visualizations
+Below are plots of some of the models above. They show that the Neural networks work best with an optimum level of decay of .05 and hidden units at 17. 
+
+```{r}
+
+plot(nn.mod, main="Neural Networks")
+
+```
+
+Support Vector Machines performs best when there is a wider decision boundary.
+
+```{r}
+
+plot(svm.fit, main="Radial Support Vector Machines")
+```
+
+Random forest work best with less than 6 trees. 
+
+```{r}
+plot(rf_mod, main="Random Forests")
+
+```
+
+The boosting algorithm used in stacking works best with fewer weak learners and smaller trees.
+
+```{r}
+plot(modelStack, main="Boosting Stacked Model")
+```
+
+#Accuracy
+Below is the accuracy of each of the models. Notice that Neural Networks, Support Vector Machines, Random forests and the stacked model did well. In fact Random Forests and the stacked model got over 97% accuracy, with the stacked model getting a slightly higher accuracy. Lasso performed the worst, most likely because it is usually used for numerical data rather than classification. I decided to exlude Lasso Regression on the stacked algorithm because of its poor performance on the data.
+
+```{r}
+
+
+cat("Lasso Regression Accuracy: ", lasso.con$overall[1])
+
+cat("Suppor Vector Machine Accuracy: ", svm.con$overall[1])
+
+cat("Random Forest Accuracy: ", rf.con$overall[1])
+
+cat("Neural Network Accuracy: ", nn.con$overall[1])
+
+cat("Stached Algorithm Accuracy", stack.con$overall[1])
+```
+
+#Prediction on Test Set
+
+First, I load the test set into R and perform the same cleaning I performed for the training set.
+
+```{r}
+dat<-read.csv(file="pml-testing.csv", header=TRUE)
+
+
+test.dats <- which(colSums(is.na(dat) |dat=="")>0.9*dim(dat)[1]) 
+
+test.datas <- dat[,-test.dats]
+
+
+test.datas<-test.datas[,-c(1:7)]
+cat("Dimensions of Cleaned Test Set: ",dim(test.datas))
+```
+
+#Final Predictions and Conclusionn
+
+As you can see, there are a wide variety of predictions from the different models. Random forests and the stacking algorithm predictions are the same and because they recieved the highest accuracy, I will use them for predictions. Due to the amount of time it took to fit the models, I would suggest carefully choosing a few promising algorithms that would perform well on the given data. The time it took to render and evaluate the models was prohibitive. Random forests are emsemble methods that use several many smaller trees to classify the data and it performed as well as ensebling all of the algorithms together. It was not necessary to perform the boosting algorithm for stacking because the accuracy was not improved significantly by stacking.
+
+```{r}
+
+
+svm.test<-predict(svm.fit, newdata=test.datas)
+
+rf.test<-predict(rf_mod, newdata=test.datas)
+
+nn.test<-predict(nn.mod, newdata=test.datas)
+
+
+pred.stack <- data.frame(svm.pred=svm.test, rf_pred=rf.test, nn.pred=nn.test)
+
+
+com.predict <- predict(modelStack, pred.stack)
+
+
+final.data<-cbind(pred.stack, com.predict)
+
+
+names(final.data)<-c("svm", "RandomForest", "NeuralNetworks", "StackedAlgorithm")
+
+final.data
+
+```
+
